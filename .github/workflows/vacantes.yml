@@ -24,6 +24,8 @@ jobs:
       - name: Revisar vacantes
         env:
           CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python vacantes_bogota.py
       - name: Guardar estado
         if: always()

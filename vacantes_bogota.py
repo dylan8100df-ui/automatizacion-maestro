@@ -15,7 +15,9 @@ Uso:
   python vacantes_bogota.py --inspect   # prueba filtros/paginador, no notifica ni guarda
   python vacantes_bogota.py --dry-run   # todo menos enviar WhatsApp
 
-Destinatarios: variable de entorno CALLMEBOT_RECIPIENTS (secret de GitHub),
+Destinatarios (secrets de GitHub, nunca en el repo):
+  - Telegram: TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_IDS ("id1,id2").
+  - WhatsApp: CALLMEBOT_RECIPIENTS,
 formato "telefono:apikey,telefono:apikey" (cada número tiene su propia apikey
 de CallMeBot). Nunca se escriben en el repo.
 """
@@ -29,6 +31,7 @@ import re
 import sys
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -225,25 +228,54 @@ def destinatarios():
     return out
 
 
-def enviar_whatsapp(texto):
-    dest = destinatarios()
-    if not dest:
-        print("Sin CALLMEBOT_RECIPIENTS: no se envía nada.")
+def telegram_chats():
+    raw = os.environ.get("TELEGRAM_CHAT_IDS", "")
+    return [c.strip() for c in raw.replace(";", ",").split(",") if c.strip()]
+
+
+def _wa(tel, key, texto):
+    url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode(
+        {"phone": tel, "text": texto, "apikey": key})
+    with urllib.request.urlopen(url, timeout=60) as r:
+        body = r.read().decode("utf-8", "replace")
+    time.sleep(5)  # CallMeBot limita la frecuencia
+    return r.status == 200 and "error" not in body.lower(), body
+
+
+def _tg(token, chat, texto):
+    data = urllib.parse.urlencode({"chat_id": chat, "text": texto}).encode("utf-8")
+    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+    return '"ok":true' in body.replace(" ", ""), body
+
+
+def enviar(texto):
+    """Envía por Telegram y/o WhatsApp (CallMeBot), según los secrets que existan.
+    Devuelve (llegó a alguno, llegó a todos)."""
+    envios = [("WhatsApp", f"#{i}", lambda t=tel, k=key: _wa(t, k, texto))
+              for i, (tel, key) in enumerate(destinatarios(), 1)]
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+        envios += [("Telegram", f"#{i}", lambda c=chat: _tg(token, c, texto))
+                   for i, chat in enumerate(telegram_chats(), 1)]
+    if not envios:
+        print("Sin destinatarios (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_IDS o CALLMEBOT_RECIPIENTS): no se envía nada.")
         return False, False
     ok_any, ok_all = False, True
-    for i, (tel, key) in enumerate(dest, 1):
-        url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode(
-            {"phone": tel, "text": texto, "apikey": key})
+    for canal, n, fn in envios:
         try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                body = r.read().decode("utf-8", "replace")
-                ok = r.status == 200 and "error" not in body.lower()
-        except Exception as e:  # no imprimir la URL: lleva la apikey
+            ok, body = fn()
+        except Exception as e:  # no imprimir URLs: llevan apikey/token
             ok, body = False, type(e).__name__
-        print(f"Destinatario #{i}: {'enviado' if ok else 'FALLÓ'}" + ("" if ok else f" ({body[:120]})"))
+        if not ok and token:
+            body = body.replace(token, "***")
+        print(f"{canal} {n}: {'enviado' if ok else 'FALLÓ'}" + ("" if ok else f" ({body[:150]})"))
         ok_any |= ok
         ok_all &= ok
-        time.sleep(5)  # CallMeBot limita la frecuencia
     return ok_any, ok_all
 
 
@@ -310,7 +342,7 @@ def main():
             if a.dry_run:
                 print("[dry-run] mensaje:\n" + t)
             else:
-                a1, a2 = enviar_whatsapp(t)
+                a1, a2 = enviar(t)
                 alguno &= a1
                 todos &= a2
 
