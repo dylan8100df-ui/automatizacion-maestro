@@ -2,7 +2,7 @@ name: Vacantes Bogotá
 
 on:
   schedule:
-    - cron: "0 * * * *"   # cada hora (UTC)
+    - cron: "*/5 * * * *"   # cada 5 min (GitHub puede atrasarlo en horas pico)
   workflow_dispatch:
 
 permissions:
