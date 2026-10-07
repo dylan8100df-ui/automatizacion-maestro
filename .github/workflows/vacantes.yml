@@ -1,0 +1,38 @@
+name: Vacantes Bogotá
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # cada hora (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # para guardar data/vacantes_vistas.json
+
+concurrency:
+  group: vacantes
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Revisar vacantes
+        env:
+          CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}
+        run: python vacantes_bogota.py
+      - name: Guardar estado
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/vacantes_vistas.json 2>/dev/null || exit 0
+          git diff --cached --quiet || (git commit -m "Actualizar vacantes vistas [skip ci]" && git push)
