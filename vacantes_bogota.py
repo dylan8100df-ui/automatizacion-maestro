@@ -229,8 +229,8 @@ def enviar_whatsapp(texto):
     dest = destinatarios()
     if not dest:
         print("Sin CALLMEBOT_RECIPIENTS: no se envía nada.")
-        return False
-    ok_all = True
+        return False, False
+    ok_any, ok_all = False, True
     for i, (tel, key) in enumerate(dest, 1):
         url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode(
             {"phone": tel, "text": texto, "apikey": key})
@@ -241,9 +241,10 @@ def enviar_whatsapp(texto):
         except Exception as e:  # no imprimir la URL: lleva la apikey
             ok, body = False, type(e).__name__
         print(f"Destinatario #{i}: {'enviado' if ok else 'FALLÓ'}" + ("" if ok else f" ({body[:120]})"))
+        ok_any |= ok
         ok_all &= ok
         time.sleep(5)  # CallMeBot limita la frecuencia
-    return ok_all
+    return ok_any, ok_all
 
 
 def trozos(lineas, maximo=1200):
@@ -287,7 +288,8 @@ def main():
     ahora = datetime.now(COT).strftime("%Y-%m-%d %H:%M")
     print(f"\n{len(nuevas)} nuevas de {len(vacantes)} (primera vez: {primera_vez})")
 
-    enviado = True
+    # alguno = llegó al menos a un número (se marcan como vistas: no re-enviar a los demás)
+    alguno, todos = True, True
     lineas = []
     if primera_vez:
         lineas = [f"✅ Monitor de vacantes activo ({ahora})",
@@ -308,23 +310,29 @@ def main():
             if a.dry_run:
                 print("[dry-run] mensaje:\n" + t)
             else:
-                enviado &= enviar_whatsapp(t)
+                a1, a2 = enviar_whatsapp(t)
+                alguno &= a1
+                todos &= a2
 
     if a.dry_run:
         print("[dry-run] no se guarda estado.")
         return 0
 
     # Guardar estado: se acumulan las ya vistas (para no re-avisar si reaparecen).
-    # Si el envío falló, las nuevas NO se marcan como vistas: se reintenta en la próxima corrida.
+    # Si no llegó a nadie (o falta el secret), las nuevas NO se marcan como vistas:
+    # se reintenta en la próxima corrida (también el mensaje de bienvenida).
     estado = dict(previo)
     for v in vacantes:
-        if v["id"] in previo or enviado or primera_vez:
+        if v["id"] in previo or alguno:
             estado[v["id"]] = {"cargo": v.get("cargo", ""), "zona": get_field(v, "Zona"),
                                "cierre": get_field(v, "Cierre vacante"),
                                "visto": previo.get(v["id"], {}).get("visto", ahora)}
+    if primera_vez and not alguno:
+        print("No se guarda estado: la bienvenida se reintenta en la próxima corrida.")
+        return 2
     STATE_FILE.parent.mkdir(exist_ok=True)
     STATE_FILE.write_text(json.dumps(estado, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
-    return 0 if enviado else 2
+    return 0 if todos else 2
 
 
 if __name__ == "__main__":
