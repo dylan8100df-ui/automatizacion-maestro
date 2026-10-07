@@ -206,8 +206,8 @@ def consultar():
 
 
 def describir(v):
-    return (f"• {v.get('cargo','')}\n  Zona: {get_field(v,'Zona')} · Cierre: {get_field(v,'Cierre vacante')}"
-            f" · Postulados: {get_field(v,'Postulados')}")
+    return (f"• {v.get('cargo','')}\n  📍 Zona: {get_field(v,'Zona')}\n"
+            f"  ⏰ Cierra: {get_field(v,'Cierre vacante')}\n  👥 Postulados: {get_field(v,'Postulados')}")
 
 
 def destinatarios():
@@ -288,17 +288,22 @@ def main():
     print(f"\n{len(nuevas)} nuevas de {len(vacantes)} (primera vez: {primera_vez})")
 
     enviado = True
+    lineas = []
     if primera_vez:
-        msg = (f"✅ Monitor de vacantes activo ({ahora}).\nBogotá · Sin asignación directa · "
-               f"Vacantes Generales\nHay {len(vacantes)} vacantes publicadas ahora. "
-               f"Te aviso cuando salga una nueva.")
-        if a.dry_run:
-            print("[dry-run] mensaje:\n" + msg)
+        lineas = [f"✅ Monitor de vacantes activo ({ahora})",
+                  "Bogotá · Sin asignación directa · Vacantes Generales", ""]
+        if vacantes:
+            lineas += [f"Estas son las {len(vacantes)} vacantes publicadas ahora:"] + \
+                      [describir(v) for v in vacantes]
         else:
-            enviado = enviar_whatsapp(msg)
+            lineas += ["Ahora mismo no hay vacantes publicadas."]
+        lineas += ["", "👉 Para verlas y postularte entra aquí:", URL, "",
+                   "Te aviso cada vez que salga una nueva."]
     elif nuevas:
         lineas = [f"🔔 {len(nuevas)} vacante(s) nueva(s) en Bogotá ({ahora}):"] + \
-                 [describir(v) for v in nuevas] + [URL]
+                 [describir(v) for v in nuevas] + \
+                 ["", "👉 Para verlas y postularte entra aquí:", URL]
+    if lineas:
         for t in trozos(lineas):
             if a.dry_run:
                 print("[dry-run] mensaje:\n" + t)
