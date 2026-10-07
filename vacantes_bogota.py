@@ -329,7 +329,7 @@ def main():
                   "Bogotá · Sin asignación directa · Vacantes Generales", ""]
         if vacantes:
             lineas += [f"Estas son las {len(vacantes)} vacantes publicadas ahora:"] + \
-                      [describir(v) for v in vacantes]
+                      [describir(v, nueva=True) for v in vacantes]
         else:
             lineas += ["Ahora mismo no hay vacantes publicadas."]
         lineas += ["", "👉 Para verlas y postularte entra aquí:", URL, "",
