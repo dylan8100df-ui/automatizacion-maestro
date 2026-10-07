@@ -6,9 +6,13 @@ Tipo Priorización = "Vacantes Generales".
 Solo CONSULTA la búsqueda pública y avisa por WhatsApp (CallMeBot) cuando
 aparece una vacante nueva. No inicia sesión ni se postula a nada.
 
+Usa peticiones HTTP normales (las mismas que hace la página al cambiar un
+filtro o de página), sin navegador: el firewall del sitio bloquea Chromium
+automatizado. El cliente se identifica con un User-Agent propio y honesto.
+
 Uso:
   python vacantes_bogota.py             # consulta, compara y notifica
-  python vacantes_bogota.py --inspect   # prueba selectores/paginador, no notifica ni guarda
+  python vacantes_bogota.py --inspect   # prueba filtros/paginador, no notifica ni guarda
   python vacantes_bogota.py --dry-run   # todo menos enviar WhatsApp
 
 Destinatarios: variable de entorno CALLMEBOT_RECIPIENTS (secret de GitHub),
@@ -17,8 +21,11 @@ de CallMeBot). Nunca se escriben en el repo.
 """
 import argparse
 import hashlib
+import html
+import http.cookiejar
 import json
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -27,19 +34,19 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 URL = "https://sistemamaestro.mineducacion.gov.co/SistemaMaestro/busquedaVacantes.xhtml"
+UA = "VacantesBogotaMonitor/1.0 (consulta publica de vacantes, 1 vez por hora)"
 STATE_FILE = Path(__file__).parent / "data" / "vacantes_vistas.json"
 COT = timezone(timedelta(hours=-5))
+FORM = "form-busqueda"
+TABLA = FORM + ":tabla-vacantes"
 
-# id del componente PrimeFaces -> texto de la opción a elegir
+# (campo del formulario, nombre, texto de la opción a elegir)
 FILTROS = [
-    ("form-busqueda:idInputSecretaria", "Secretaria", "Bogotá"),
-    ("form-busqueda:idInputArea", "Área", "Sin asignación directa"),
-    ("form-busqueda:idInputTipoPonderado", "Tipo Priorización", "Vacantes Generales"),
+    (FORM + ":idInputSecretaria", "Secretaría", "Bogotá"),
+    (FORM + ":idInputArea", "Área", "Sin asignación directa"),
+    (FORM + ":idInputTipoPonderado", "Tipo Priorización", "Vacantes Generales"),
 ]
-TABLA = "form-busqueda:tabla-vacantes"
 
 
 def norm(s):
@@ -48,89 +55,76 @@ def norm(s):
     return " ".join(s.lower().split())
 
 
-def css_id(i):
-    return "#" + i.replace(":", "\\:")
+def decode(b):
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        return b.decode("iso-8859-1")  # el servidor mezcla codificaciones
 
 
-def esperar_ajax(page, timeout=30000):
-    page.wait_for_function(
-        "() => !window.PrimeFaces || !PrimeFaces.ajax || PrimeFaces.ajax.Queue.isEmpty()",
-        timeout=timeout,
-    )
-    page.wait_for_load_state("networkidle", timeout=timeout)
+class Sesion:
+    def __init__(self):
+        self.op = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.viewstate = None
+
+    def get(self):
+        req = urllib.request.Request(URL, headers={"User-Agent": UA})
+        with self.op.open(req, timeout=60) as r:
+            t = decode(r.read())
+        self._viewstate(t)
+        return t
+
+    def ajax(self, data):
+        data = dict(data, **{"javax.faces.partial.ajax": "true", "javax.faces.ViewState": self.viewstate})
+        req = urllib.request.Request(URL, data=urllib.parse.urlencode(data).encode("utf-8"), headers={
+            "User-Agent": UA, "Faces-Request": "partial/ajax", "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
+        with self.op.open(req, timeout=60) as r:
+            t = decode(r.read())
+        if "<partial-response" not in t:
+            raise RuntimeError("Respuesta inesperada del servidor (¿bloqueo o cambio de la página?)")
+        if "<error>" in t:
+            raise RuntimeError("El servidor devolvió un error JSF: " + re.sub(r"\s+", " ", t)[:300])
+        self._viewstate(t)
+        return t
+
+    def _viewstate(self, t):
+        m = (re.search(r'<update id="[^"]*javax\.faces\.ViewState[^"]*"><!\[CDATA\[(.*?)\]\]>', t)
+             or re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', t))
+        if m:
+            self.viewstate = m.group(1)
 
 
-def elegir_opcion(page, comp_id, texto):
-    """Selecciona una opción de un p:selectOneMenu por su texto visible.
-    Usa el widget de PrimeFaces (dispara el ajax igual que un clic)."""
-    sel = css_id(comp_id + "_input")
-    page.wait_for_selector(sel, state="attached", timeout=30000)
-    opciones = page.eval_on_selector_all(
-        sel + " option", "os => os.map(o => [o.value, o.textContent.trim()])"
-    )
-    valor = next((v for v, t in opciones if norm(t) == norm(texto)), None)
-    if valor is None:
-        raise RuntimeError(f"No encontré la opción '{texto}' en {comp_id} ({len(opciones)} opciones)")
-    ok = page.evaluate(
-        """([id, v]) => {
-            const w = Object.values(PrimeFaces.widgets || {}).find(w => w && w.id === id);
-            if (w && w.selectValue) { w.selectValue(v); return 'widget'; }
-            const s = document.getElementById(id + '_input');
-            s.value = v; s.dispatchEvent(new Event('change', {bubbles: true}));
-            return 'change';
-        }""",
-        [comp_id, valor],
-    )
-    esperar_ajax(page)
-    actual = page.eval_on_selector(sel, "s => s.value")
-    if actual != valor:
-        raise RuntimeError(f"{comp_id}: quedó '{actual}' en vez de '{valor}'")
-    return valor, ok, len(opciones)
+def opciones(pagina, campo):
+    m = re.search(r'<select id="%s_input".*?</select>' % re.escape(campo), pagina, re.S)
+    if not m:
+        raise RuntimeError(f"No encontré el selector {campo}_input en la página")
+    return [(v, html.unescape(t).strip())
+            for v, t in re.findall(r'<option value="([^"]*)"[^>]*>([^<]*)', m.group(0))]
 
 
-def leer_pagina(page):
-    """Devuelve las vacantes visibles como lista de dicts {campo: valor}."""
-    return page.evaluate(
-        """(tabla) => {
-            const root = document.getElementById(tabla + '_content');
-            if (!root) return [];
-            return [...root.querySelectorAll('.vacante')].map(p => {
-                const labels = [...p.querySelectorAll('label')].map(l => l.textContent.replace(/\\s+/g, ' ').trim()).filter(Boolean);
-                const d = {cargo: labels[0] || ''};
-                for (const t of labels.slice(1)) {
-                    const i = t.indexOf(':');
-                    if (i > 0) d[t.slice(0, i).trim()] = t.slice(i + 1).trim();
-                }
-                return d;
-            });
-        }""",
-        TABLA,
-    )
+def leer_vacantes(fragmento):
+    out = []
+    bloques = re.split(r'(?=<div id="[^"]*" class="ui-panel[^"]*\bvacante\b)', fragmento)
+    for b in bloques[1:]:
+        labels = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", l))).strip()
+                  for l in re.findall(r"<label[^>]*>(.*?)</label>", b, re.S)]
+        labels = [l for l in labels if l]
+        if not labels:
+            continue
+        d = {"cargo": labels[0]}
+        for l in labels[1:]:
+            if ":" in l:
+                k, v = l.split(":", 1)
+                d[k.strip()] = v.strip()
+        out.append(d)
+    return out
 
 
-def info_paginador(page):
-    return page.evaluate(
-        """(tabla) => {
-            const pg = document.getElementById(tabla + '_paginator_top') || document.querySelector('.ui-paginator');
-            if (!pg) return null;
-            const cur = pg.querySelector('.ui-paginator-current');
-            const next = pg.querySelector('.ui-paginator-next');
-            return {texto: cur ? cur.textContent.trim() : '',
-                    hay_siguiente: !!next && !next.classList.contains('ui-state-disabled')};
-        }""",
-        TABLA,
-    )
-
-
-def poner_filas_por_pagina(page, n="24"):
-    sel = css_id(TABLA) + " select.ui-paginator-rpp-options"
-    if page.query_selector(sel):
-        valores = page.eval_on_selector_all(sel + " >> nth=0 >> option", "os => os.map(o => o.value)")
-        if n in valores:
-            page.locator(sel).first.select_option(n)
-            esperar_ajax(page)
-            return True
-    return False
+def total_filas(t):
+    m = re.findall(r"rowCount:(\d+)", t)
+    return int(m[-1]) if m else None
 
 
 def get_field(d, *nombres):
@@ -149,58 +143,65 @@ def clave(v):
     return hashlib.sha1(norm("|".join(partes)).encode()).hexdigest()[:16]
 
 
-def consultar(inspect=False):
-    vacantes, log = [], []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(locale="es-CO")
-        page.goto(URL, wait_until="networkidle", timeout=90000)
-        esperar_ajax(page)
-        log.append(f"Página cargada: {page.title()!r}")
+def consultar():
+    log, s = [], Sesion()
+    pagina = s.get()
+    log.append(f"Página cargada ({len(pagina)} bytes)")
 
-        for comp_id, nombre, texto in FILTROS:
-            valor, modo, n = elegir_opcion(page, comp_id, texto)
-            log.append(f"OK filtro {nombre}: '{texto}' (value={valor}, {n} opciones, vía {modo})")
+    form = {FORM: FORM, FORM + ":idInputDepartamento_input": ""}
+    for campo, nombre, texto in FILTROS:
+        ops = opciones(pagina, campo)
+        valor = next((v for v, t in ops if norm(t) == norm(texto)), None)
+        if valor is None:
+            raise RuntimeError(f"No encontré la opción '{texto}' en {nombre} ({len(ops)} opciones)")
+        form[campo + "_input"] = valor
+        log.append(f"OK filtro {nombre}: '{texto}' (value={valor}, {len(ops)} opciones)")
 
-        if poner_filas_por_pagina(page):
-            log.append("OK paginador: 24 filas por página")
-        else:
-            log.append("Aviso: no se pudo cambiar filas por página (se usa el valor por defecto)")
+    # Igual que el onchange del último filtro: procesa todo el formulario.
+    r = s.ajax(dict(form, **{
+        "javax.faces.source": FILTROS[-1][0], "javax.faces.partial.execute": "@all",
+        "javax.faces.partial.render": "accordion", "javax.faces.behavior.event": "change",
+        "javax.faces.partial.event": "change"}))
+    total = total_filas(r)
+    vacantes = leer_vacantes(r)
+    log.append(f"Resultados: {total} vacantes en total; página 1 trae {len(vacantes)}")
+    if total is None:
+        raise RuntimeError("No encontré el total de resultados (rowCount) en la respuesta")
 
-        pagina = 1
-        vistas = set()
-        while True:
-            filas = leer_pagina(page)
-            pg = info_paginador(page)
-            log.append(f"Página {pagina}: {len(filas)} vacantes; paginador={pg}")
-            for f in filas:
-                k = clave(f)
-                n = 2
-                while k in vistas:  # dos vacantes idénticas en texto
-                    k = clave(f) + f"-{n}"; n += 1
-                vistas.add(k)
-                f["id"] = k
-                vacantes.append(f)
-            if not pg or not pg["hay_siguiente"] or pagina >= 50:
-                break
-            antes = page.eval_on_selector(css_id(TABLA) + "_content", "e => e.innerText")
-            page.locator(css_id(TABLA) + "_paginator_top .ui-paginator-next").click()
-            esperar_ajax(page)
-            page.wait_for_function(
-                "([sel, a]) => document.querySelector(sel).innerText !== a",
-                arg=[css_id(TABLA) + "_content", antes], timeout=30000,
-            )
-            pagina += 1
+    paso = len(vacantes) or 6
+    n = 1
+    while len(vacantes) < total and n < 50:
+        n += 1
+        r = s.ajax(dict(form, **{
+            "javax.faces.source": TABLA, "javax.faces.partial.execute": TABLA,
+            "javax.faces.partial.render": TABLA, TABLA: TABLA,
+            TABLA + "_pagination": "true", TABLA + "_first": str(len(vacantes)),
+            TABLA + "_rows": str(paso), TABLA + "_encodeFeature": "true"}))
+        nuevas = leer_vacantes(r)
+        log.append(f"Página {n}: {len(nuevas)} vacantes")
+        if not nuevas:
+            break
+        vacantes += nuevas
+        time.sleep(1)  # sin afán: no cargar el servidor
 
-        # Validación: todo lo leído debe cumplir los filtros.
-        fuera = [v for v in vacantes
-                 if norm(get_field(v, "Secretaría de Educación")) != norm("Bogotá")
-                 or norm(get_field(v, "Área", "Area")) != norm("Sin asignación directa")
-                 or norm(get_field(v, "Tipo Priorización")) != norm("Vacantes Generales")]
-        log.append(f"Total: {len(vacantes)} vacantes; {len(fuera)} no cumplen los filtros")
-        if fuera:
-            raise RuntimeError(f"{len(fuera)} vacantes no cumplen los filtros; el filtrado falló: {fuera[:2]}")
-        browser.close()
+    if len(vacantes) != total:
+        raise RuntimeError(f"Leí {len(vacantes)} vacantes pero el servidor dice {total}")
+
+    vistas = set()
+    for v in vacantes:
+        k, i = clave(v), 2
+        while k in vistas:  # dos vacantes idénticas en texto
+            k = f"{clave(v)}-{i}"; i += 1
+        vistas.add(k)
+        v["id"] = k
+
+    fuera = [v for v in vacantes
+             if norm(get_field(v, "Secretaría de Educación")) != norm("Bogotá")
+             or norm(get_field(v, "Área", "Area")) != norm("Sin asignación directa")
+             or norm(get_field(v, "Tipo Priorización")) != norm("Vacantes Generales")]
+    log.append(f"Total leído: {len(vacantes)}; {len(fuera)} no cumplen los filtros")
+    if fuera:
+        raise RuntimeError(f"{len(fuera)} vacantes no cumplen los filtros; el filtrado falló: {fuera[:2]}")
     return vacantes, log
 
 
@@ -236,7 +237,7 @@ def enviar_whatsapp(texto):
         try:
             with urllib.request.urlopen(url, timeout=60) as r:
                 body = r.read().decode("utf-8", "replace")
-            ok = r.status == 200 and "error" not in body.lower()
+                ok = r.status == 200 and "error" not in body.lower()
         except Exception as e:  # no imprimir la URL: lleva la apikey
             ok, body = False, type(e).__name__
         print(f"Destinatario #{i}: {'enviado' if ok else 'FALLÓ'}" + ("" if ok else f" ({body[:120]})"))
@@ -256,13 +257,18 @@ def trozos(lineas, maximo=1200):
 
 
 def main():
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inspect", action="store_true", help="solo prueba selectores y paginador")
+    ap.add_argument("--inspect", action="store_true", help="solo prueba filtros y paginador")
     ap.add_argument("--dry-run", action="store_true", help="no envía WhatsApp")
     a = ap.parse_args()
 
     try:
-        vacantes, log = consultar(a.inspect)
+        vacantes, log = consultar()
     except Exception as e:
         print(f"ERROR consultando la página: {e}")
         return 1
@@ -286,7 +292,10 @@ def main():
         msg = (f"✅ Monitor de vacantes activo ({ahora}).\nBogotá · Sin asignación directa · "
                f"Vacantes Generales\nHay {len(vacantes)} vacantes publicadas ahora. "
                f"Te aviso cuando salga una nueva.")
-        enviado = a.dry_run or enviar_whatsapp(msg)
+        if a.dry_run:
+            print("[dry-run] mensaje:\n" + msg)
+        else:
+            enviado = enviar_whatsapp(msg)
     elif nuevas:
         lineas = [f"🔔 {len(nuevas)} vacante(s) nueva(s) en Bogotá ({ahora}):"] + \
                  [describir(v) for v in nuevas] + [URL]
@@ -296,7 +305,11 @@ def main():
             else:
                 enviado &= enviar_whatsapp(t)
 
-    # Guardar estado: las vigentes + las ya vistas (para no re-avisar si reaparecen).
+    if a.dry_run:
+        print("[dry-run] no se guarda estado.")
+        return 0
+
+    # Guardar estado: se acumulan las ya vistas (para no re-avisar si reaparecen).
     # Si el envío falló, las nuevas NO se marcan como vistas: se reintenta en la próxima corrida.
     estado = dict(previo)
     for v in vacantes:

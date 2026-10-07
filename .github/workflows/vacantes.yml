@@ -15,16 +15,12 @@ concurrency:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Instalar dependencias
-        run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
       - name: Revisar vacantes
         env:
           CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}

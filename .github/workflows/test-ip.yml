@@ -6,7 +6,7 @@ on:
 jobs:
   probar:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: IP pública del runner
@@ -16,8 +16,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Inspección con Playwright (no notifica)
-        run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
-          python vacantes_bogota.py --inspect
+      - name: Inspección (no notifica)
+        run: python vacantes_bogota.py --inspect
