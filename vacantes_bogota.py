@@ -208,8 +208,9 @@ def consultar():
     return vacantes, log
 
 
-def describir(v):
-    return (f"• {v.get('cargo','')}\n  📍 Zona: {get_field(v,'Zona')}\n"
+def describir(v, nueva=False):
+    marca = "🟢 NUEVA · " if nueva else "• "
+    return (f"{marca}{v.get('cargo','')}\n  📍 Zona: {get_field(v,'Zona')}\n"
             f"  ⏰ Cierra: {get_field(v,'Cierre vacante')}\n  👥 Postulados: {get_field(v,'Postulados')}")
 
 
@@ -334,8 +335,16 @@ def main():
         lineas += ["", "👉 Para verlas y postularte entra aquí:", URL, "",
                    "Te aviso cada vez que salga una nueva."]
     elif nuevas:
-        lineas = [f"🔔 {len(nuevas)} vacante(s) nueva(s) en Bogotá ({ahora}):"] + \
-                 [describir(v) for v in nuevas] + \
+        # Siempre la lista completa; las nuevas primero y marcadas con 🟢 NUEVA.
+        ids_nuevas = {v["id"] for v in nuevas}
+        viejas = [v for v in vacantes if v["id"] not in ids_nuevas]
+        n = len(nuevas)
+        titulo = "una vacante nueva" if n == 1 else f"{n} vacantes nuevas"
+        lineas = [f"🔔 ¡Salió {titulo}! ({ahora})",
+                  "Bogotá · Sin asignación directa · Vacantes Generales",
+                  f"Publicadas ahora: {len(vacantes)} ({n} 🟢 nueva{'' if n == 1 else 's'})", ""] + \
+                 [describir(v, nueva=True) for v in nuevas] + \
+                 [describir(v) for v in viejas] + \
                  ["", "👉 Para verlas y postularte entra aquí:", URL]
     if lineas:
         for t in trozos(lineas):
