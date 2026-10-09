@@ -396,22 +396,35 @@ def resumen_diario(estado, vacantes, forzar=False, dry_run=False):
     previo = json.loads(RESUMEN_FILE.read_text(encoding="utf-8")) if RESUMEN_FILE.exists() else {}
     if not forzar and (hoy.hour < HORA_RESUMEN or previo.get("ultimo") == fecha):
         return True
-    n = sum(1 for e in estado.values() if str(e.get("visto", "")).startswith(fecha))
+    de_hoy = sorted(((k, e) for k, e in estado.items() if str(e.get("visto", "")).startswith(fecha)),
+                    key=lambda ke: ke[1].get("visto", ""))
+    n = len(de_hoy)
+    actuales = {v["id"]: v for v in vacantes if "id" in v}
     filtros = "📍 Bogotá · Sin asignación directa · Vacantes Generales"
     if n:
         lineas = [f"🌙 Resumen de hoy ({hoy.strftime('%d/%m/%Y')})", "",
                   f"Hoy se encontr{'ó 1 vacante nueva' if n == 1 else f'aron {n} vacantes nuevas'} con los filtros:",
-                  filtros, f"Publicadas ahora mismo: {len(vacantes)}"]
+                  filtros, f"Publicadas ahora mismo: {len(vacantes)}", ""]
+        for k, e in de_hoy:
+            v = actuales.get(k)
+            lineas.append(f"• {e.get('cargo', '')}\n  📍 Zona: {e.get('zona', '')}\n"
+                          f"  🕒 Salió: {str(e.get('visto', ''))[11:16]}\n  ⏰ Cierra: {e.get('cierre', '')}\n"
+                          + (f"  👥 Postulados: {get_field(v, 'Postulados')} · ✅ sigue abierta" if v
+                             else "  ⛔ ya no aparece publicada"))
     else:
         lineas = [f"🌙 Resumen de hoy ({hoy.strftime('%d/%m/%Y')})", "",
                   "Hoy no se publicaron vacantes nuevas con los filtros:", filtros,
                   f"Publicadas ahora mismo: {len(vacantes)}", "", "Mañana sigo pendiente 💪"]
     lineas += ["", "👉 Para revisar entra aquí:", URL]
-    texto = "\n".join(lineas)
+    partes = list(trozos(lineas))
     if dry_run:
-        print("[dry-run] resumen:\n" + texto)
+        for t in partes:
+            print("[dry-run] resumen:\n" + t)
         return True
-    alguno, _ = enviar(texto)
+    alguno = True
+    for t in partes:
+        a1, _ = enviar(t)
+        alguno &= a1
     if alguno:
         RESUMEN_FILE.write_text(json.dumps({"ultimo": fecha}), encoding="utf-8")
     return alguno
