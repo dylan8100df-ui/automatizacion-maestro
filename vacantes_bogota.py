@@ -301,11 +301,16 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="no envía WhatsApp")
     a = ap.parse_args()
 
-    try:
-        vacantes, log = consultar()
-    except Exception as e:
-        print(f"ERROR consultando la página: {e}")
-        return 1
+    for intento in range(1, 4):  # la página del Ministerio a veces no responde
+        try:
+            vacantes, log = consultar()
+            break
+        except Exception as e:
+            print(f"Intento {intento}/3 falló: {e}")
+            if intento == 3:
+                print("ERROR consultando la página: se reintenta en la próxima corrida.")
+                return 1
+            time.sleep(20)
     print("\n".join(log))
 
     if a.inspect:
