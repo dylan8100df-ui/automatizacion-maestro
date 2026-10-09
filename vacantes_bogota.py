@@ -40,6 +40,8 @@ from pathlib import Path
 URL = "https://sistemamaestro.mineducacion.gov.co/SistemaMaestro/busquedaVacantes.xhtml"
 UA = "VacantesBogotaMonitor/1.0 (consulta publica de vacantes, 1 vez por hora)"
 STATE_FILE = Path(__file__).parent / "data" / "vacantes_vistas.json"
+RESUMEN_FILE = Path(__file__).parent / "data" / "resumen.json"
+HORA_RESUMEN = 22  # 10 p. m. hora Colombia
 COT = timezone(timedelta(hours=-5))
 FORM = "form-busqueda"
 TABLA = FORM + ":tabla-vacantes"
@@ -298,7 +300,8 @@ def main():
             pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--inspect", action="store_true", help="solo prueba filtros y paginador")
-    ap.add_argument("--dry-run", action="store_true", help="no envía WhatsApp")
+    ap.add_argument("--dry-run", action="store_true", help="no envía mensajes")
+    ap.add_argument("--resumen", action="store_true", help="manda el resumen del día ya (sin esperar las 22:00)")
     a = ap.parse_args()
 
     for intento in range(1, 4):  # la página del Ministerio a veces no responde
@@ -361,6 +364,8 @@ def main():
                 todos &= a2
 
     if a.dry_run:
+        if a.resumen:
+            resumen_diario(previo, vacantes, forzar=True, dry_run=True)
         print("[dry-run] no se guarda estado.")
         return 0
 
@@ -378,7 +383,38 @@ def main():
         return 2
     STATE_FILE.parent.mkdir(exist_ok=True)
     STATE_FILE.write_text(json.dumps(estado, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+    if not resumen_diario(estado, vacantes, a.resumen):
+        todos = False
     return 0 if todos else 2
+
+
+def resumen_diario(estado, vacantes, forzar=False, dry_run=False):
+    """Una vez al día, desde las 22:00 (Colombia), resume lo que se publicó hoy.
+    Devuelve False solo si había que enviarlo y no llegó a nadie."""
+    hoy = datetime.now(COT)
+    fecha = hoy.strftime("%Y-%m-%d")
+    previo = json.loads(RESUMEN_FILE.read_text(encoding="utf-8")) if RESUMEN_FILE.exists() else {}
+    if not forzar and (hoy.hour < HORA_RESUMEN or previo.get("ultimo") == fecha):
+        return True
+    n = sum(1 for e in estado.values() if str(e.get("visto", "")).startswith(fecha))
+    filtros = "📍 Bogotá · Sin asignación directa · Vacantes Generales"
+    if n:
+        lineas = [f"🌙 Resumen de hoy ({hoy.strftime('%d/%m/%Y')})", "",
+                  f"Hoy se encontr{'ó 1 vacante nueva' if n == 1 else f'aron {n} vacantes nuevas'} con los filtros:",
+                  filtros, f"Publicadas ahora mismo: {len(vacantes)}"]
+    else:
+        lineas = [f"🌙 Resumen de hoy ({hoy.strftime('%d/%m/%Y')})", "",
+                  "Hoy no se publicaron vacantes nuevas con los filtros:", filtros,
+                  f"Publicadas ahora mismo: {len(vacantes)}", "", "Mañana sigo pendiente 💪"]
+    lineas += ["", "👉 Para revisar entra aquí:", URL]
+    texto = "\n".join(lineas)
+    if dry_run:
+        print("[dry-run] resumen:\n" + texto)
+        return True
+    alguno, _ = enviar(texto)
+    if alguno:
+        RESUMEN_FILE.write_text(json.dumps({"ultimo": fecha}), encoding="utf-8")
+    return alguno
 
 
 if __name__ == "__main__":
