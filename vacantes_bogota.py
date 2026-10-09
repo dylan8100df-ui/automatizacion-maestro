@@ -396,9 +396,18 @@ def resumen_diario(estado, vacantes, forzar=False, dry_run=False):
     previo = json.loads(RESUMEN_FILE.read_text(encoding="utf-8")) if RESUMEN_FILE.exists() else {}
     if not forzar and (hoy.hour < HORA_RESUMEN or previo.get("ultimo") == fecha):
         return True
-    de_hoy = sorted(((k, e) for k, e in estado.items() if str(e.get("visto", "")).startswith(fecha)),
+    # Cubre todo lo que salió desde el resumen anterior (incluye lo de después
+    # de las 22:00 de ayer); la primera vez, solo lo de hoy.
+    desde = previo.get("hasta")
+    def cuenta(e):
+        visto = str(e.get("visto", ""))
+        return visto > desde if desde else visto.startswith(fecha)
+    de_hoy = sorted(((k, e) for k, e in estado.items() if cuenta(e)),
                     key=lambda ke: ke[1].get("visto", ""))
     n = len(de_hoy)
+    def salio(e):  # "09:15" si fue hoy, "ayer 22:30" si fue antes
+        visto = str(e.get("visto", ""))
+        return visto[11:16] if visto.startswith(fecha) else f"ayer {visto[11:16]}"
     actuales = {v["id"]: v for v in vacantes if "id" in v}
     filtros = "📍 Bogotá · Sin asignación directa · Vacantes Generales"
     if n:
@@ -408,7 +417,7 @@ def resumen_diario(estado, vacantes, forzar=False, dry_run=False):
         for k, e in de_hoy:
             v = actuales.get(k)
             lineas.append(f"• {e.get('cargo', '')}\n  📍 Zona: {e.get('zona', '')}\n"
-                          f"  🕒 Salió: {str(e.get('visto', ''))[11:16]}\n  ⏰ Cierra: {e.get('cierre', '')}\n"
+                          f"  🕒 Salió: {salio(e)}\n  ⏰ Cierra: {e.get('cierre', '')}\n"
                           + (f"  👥 Postulados: {get_field(v, 'Postulados')} · ✅ sigue abierta" if v
                              else "  ⛔ ya no aparece publicada"))
     else:
@@ -426,7 +435,8 @@ def resumen_diario(estado, vacantes, forzar=False, dry_run=False):
         a1, _ = enviar(t)
         alguno &= a1
     if alguno:
-        RESUMEN_FILE.write_text(json.dumps({"ultimo": fecha}), encoding="utf-8")
+        RESUMEN_FILE.write_text(json.dumps({"ultimo": fecha, "hasta": hoy.strftime("%Y-%m-%d %H:%M")}),
+                                encoding="utf-8")
     return alguno
 
 
