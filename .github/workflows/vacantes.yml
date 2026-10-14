@@ -17,7 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      # ref: main = el estado MÁS RECIENTE al arrancar (no el del momento en que se
+      # programó la corrida); así dos corridas seguidas no repiten avisos ni resumen.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -33,4 +37,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/ 2>/dev/null || exit 0
-          git diff --cached --quiet || (git commit -m "Actualizar estado de vacantes [skip ci]" && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "Actualizar estado de vacantes [skip ci]"
+          git push || (git pull --rebase -X theirs && git push)
